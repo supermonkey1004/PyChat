@@ -301,6 +301,13 @@ def handle_client(client_socket, address):
 
     name = handshake.get("name", "Unknown").strip()
 
+    # Reject empty or whitespace-only names during registration handshake
+    if not name:
+        log_server_event(f"[SECURITY] Rejected connection at {address[0]} - Handshake contains empty name.")
+        send_packet(client_socket, {"type": "kicked_policy"})
+        client_socket.close()
+        return
+
     if contains_forbidden_words(name):
         log_server_event(f"[MODERATION] Blocked registration - Offensive name: '{name}'")
         send_packet(client_socket, {"type": "kicked_policy"})
@@ -435,7 +442,13 @@ def handle_client(client_socket, address):
 
         elif packet_type == "name_change":
             new_name = packet.get("name", "").strip()
-            if contains_forbidden_words(new_name):
+            # Reject empty or whitespace-only names during name change requests
+            if not new_name:
+                send_packet(client_socket, {
+                    "type": "system",
+                    "content": "SYSTEM: Name change rejected. Username cannot be empty.\n"
+                })
+            elif contains_forbidden_words(new_name):
                 send_packet(client_socket, {
                     "type": "system",
                     "content": "SYSTEM: Name change rejected.\n"
