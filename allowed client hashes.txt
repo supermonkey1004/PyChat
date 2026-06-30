@@ -1,0 +1,5 @@
+# Allowed Client Hashes
+# Format: HASH DESCRIPTION
+# Add a hash: python3 add_client_hash.py "client code 2.py" "description"
+# Remove dev hashes before committing
+ab4443025685d60c4b1e9b288a59c52629cad8feca173643807fada76b912966 Release v1.0

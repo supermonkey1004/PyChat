@@ -23,11 +23,11 @@ CHAT_PORT = 50002       # The port used for sending and receiving chat messages 
 DISCOVERY_PORT = 50001 # The port used to broadcast the server's location (UDP)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CHOSEN_NAMES_FILE = os.path.join(BASE_DIR, "chosen names", "allowed names.txt")
-RECENT_CLIENT_DIR = os.path.join(BASE_DIR, "recent client")
+ALLOWED_HASHES_FILE = os.path.join(BASE_DIR, "allowed client hashes.txt")
 
 # Set this to True to block clients if their code has been altered or renamed.
 # Set to False to allow any client connection regardless of file hash.
-STRICT_HASH_CHECK = False
+STRICT_HASH_CHECK = True
 
 # Professional light theme color palette: pure white background with soft panels
 BG_MAIN = "#FFFFFF"      # Clean white main background
@@ -42,7 +42,6 @@ displayed_clients = [] # Stores list of active clients currently rendered in the
 user_reports = []      # Log of reported policy/abuse incidents
 FORBIDDEN_WORDS = []   # List of words loaded from the blocklist file
 ALLOWED_NAME_OPTIONS = []
-ALLOWED_CLIENT_HASHES = set()
 
 # ------------------------------------------------------------------------------
 # PROGRAMMATIC GENERATION OF 100 MEMES (2019-2026) & EMOJIS
@@ -105,17 +104,6 @@ def get_expected_client_hash():
         return "DEFAULT_IDLE_CLIENT_TOKEN_v3.0"
 
 
-def calculate_normalized_file_hash(filename):
-    """Returns the normalized SHA-256 hash for a text file."""
-    try:
-        with open(filename, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-        lines = [line.rstrip() for line in normalized.split("\n")]
-        normalized_content = "\n".join(lines).strip()
-        return hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
-    except Exception:
-        return None
 
 EXPECTED_HASH = get_expected_client_hash()
 
@@ -170,22 +158,19 @@ def load_allowed_names(filename=CHOSEN_NAMES_FILE):
     ALLOWED_NAME_OPTIONS = allowed_names
 
 
-def load_recent_client_hashes(folder=RECENT_CLIENT_DIR):
-    """Loads approved client hashes from files saved in the recent client folder."""
-    global ALLOWED_CLIENT_HASHES
-    os.makedirs(folder, exist_ok=True)
-    collected_hashes = set()
-    for root, _, files in os.walk(folder):
-        for filename in files:
-            if not filename.lower().endswith(".py"):
-                continue
-            file_path = os.path.join(root, filename)
-            file_hash = calculate_normalized_file_hash(file_path)
-            if file_hash:
-                collected_hashes.add(file_hash)
-    if not collected_hashes:
-        collected_hashes.add(get_expected_client_hash())
-    ALLOWED_CLIENT_HASHES = collected_hashes
+def load_allowed_client_hashes(filename=ALLOWED_HASHES_FILE):
+    """Loads approved client hashes from the hash registry file."""
+    hashes = set()
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                for line in f:
+                    entry = line.strip()
+                    if entry and not entry.startswith("#"):
+                        hashes.add(entry.split()[0])
+        except Exception as e:
+            log_server_event(f"Error reading allowed hashes: {e}")
+    return hashes
 
 
 def name_is_available(candidate_name, exclude_client=None):
@@ -374,14 +359,20 @@ def handle_client(client_socket, address):
         return
 
     load_allowed_names()
-    load_recent_client_hashes()
+    allowed_hashes = load_allowed_client_hashes()
 
     client_hash = handshake.get("hash", "")
-    if client_hash not in ALLOWED_CLIENT_HASHES:
-        log_server_event(f"[SECURITY] Rejected connection at {address[0]} - client code not in recent client folder.")
-        send_packet(client_socket, {"type": "reject_integrity", "reason": "client_not_approved"})
-        client_socket.close()
-        return
+    if not allowed_hashes:
+        log_server_event("[WARNING] No approved client hashes found in allowed client hashes.txt.")
+    if STRICT_HASH_CHECK:
+        if allowed_hashes and client_hash not in allowed_hashes:
+            log_server_event(f"[SECURITY] Rejected connection at {address[0]} - client hash not approved.")
+            send_packet(client_socket, {"type": "reject_integrity", "reason": "client_not_approved"})
+            client_socket.close()
+            return
+    else:
+        if allowed_hashes and client_hash not in allowed_hashes:
+            log_server_event(f"[INFO] Hash mismatch from {address[0]} (ignored — STRICT_HASH_CHECK is off).")
 
     name = handshake.get("name", "Unknown").strip()
 
@@ -405,6 +396,8 @@ def handle_client(client_socket, address):
         client_socket.close()
         return
 
+    send_packet(client_socket, {"type": "handshake_ok"})
+
     client = None
     for old_client in clients:
         if old_client["name"].lower() == name.lower() and old_client["status"] == "offline":
@@ -422,8 +415,8 @@ def handle_client(client_socket, address):
 
     if not client:
         client = {
-            "socket": client_socket, 
-            "name": name, 
+            "socket": client_socket,
+            "name": name,
             "addr": address,
             "kicked": None,
             "status": "online",
@@ -441,8 +434,6 @@ def handle_client(client_socket, address):
             "type": "system",
             "content": f"[JOIN] {name} has joined the chat.\n"
         })
-
-    send_packet(client_socket, {"type": "handshake_ok"})
     update_user_lists()
     
     try:
@@ -636,7 +627,8 @@ def start_network_server():
 
     load_forbidden_words()
     load_allowed_names()
-    load_recent_client_hashes()
+    loaded_hashes = load_allowed_client_hashes()
+    log_server_event(f"Loaded {len(loaded_hashes)} approved client hash(es).")
     threading.Thread(target=broadcast_presence, daemon=True).start()
 
     while True:

@@ -198,12 +198,7 @@ def receive_messages():
             window.after(0, messagebox.showwarning, "Nickname Rejected", message)
             continue
         elif packet_type == "reject_integrity":
-            reason = packet.get("reason", "client_not_approved")
-            if reason == "client_not_approved":
-                message = "This client code is not in the server's recent client folder."
-            else:
-                message = "Integrity check failed."
-            window.after(0, terminate_app, "Hash Error", message)
+            window.after(0, terminate_app, "Hash Error", "This client code is not approved by the server.")
             break
             
         # Prank Redirect injection handlers
@@ -759,10 +754,12 @@ def refresh_allowed_name_picker(*args):
 
 try:
     load_allowed_name_options()
-    server = connect_to_server()
+    server_ip, server_port = find_server()
 except Exception as e:
     print(f"Network Chat lookup failed: {e}")
     exit()
+
+server = None
 
 # Profile Setup Layout
 reg_win = tk.Tk()
@@ -783,7 +780,6 @@ else:
     username_picker = tk.Entry(reg_win, textvariable=username_var, bg=BG_BOX, fg=FG_TEXT, font=("Segoe UI", 10), justify=tk.CENTER, bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, insertbackground="black")
     username_picker.pack(pady=5, fill=tk.X, padx=20)
 
-tk.Label(reg_win, text="Approved names come from chosen names/allowed names.txt", bg=BG_MAIN, fg="#65676B", font=("Segoe UI", 8, "italic")).pack(pady=(0, 5))
 
 registration_status = tk.StringVar(value="")
 status_label = tk.Label(reg_win, textvariable=registration_status, bg=BG_MAIN, fg=ACCENT_RED, font=("Segoe UI", 8, "bold"), wraplength=300, justify=tk.CENTER)
@@ -800,7 +796,8 @@ def register_profile():
     if entered:
         trial_server = None
         try:
-            trial_server = connect_to_server()
+            trial_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            trial_server.connect((server_ip, server_port))
             send_packet(trial_server, {
                 "type": "handshake",
                 "name": entered,
@@ -839,13 +836,9 @@ def register_profile():
             else:
                 registration_status.set("That username cannot be used.")
         elif response and response.get("type") == "reject_integrity":
-            reason = response.get("reason", "client_not_approved")
-            if reason == "client_not_approved":
-                registration_status.set("This client code is not in the server's recent client folder.")
-            else:
-                registration_status.set("This client code is not approved by the server.")
+            registration_status.set("This client code is not approved by the server.")
         else:
-            registration_status.set(f"Registration was rejected. Response: {response}")
+            registration_status.set("Could not connect. Please try again.")
 
         if trial_server:
             try:
@@ -860,7 +853,8 @@ tk.Button(button_frame, text="Connect", bg=ACCENT_BLUE, fg="white", font=("Segoe
 reg_win.mainloop()
 
 if not name:
-    server.close()
+    if server:
+        server.close()
     exit()
 
 
