@@ -21,6 +21,9 @@ from tkinter import messagebox, simpledialog, ttk # GUI popup dialogs and modern
 # ------------------------------------------------------------------------------
 CHAT_PORT = 50002       # The port used for sending and receiving chat messages (TCP)
 DISCOVERY_PORT = 50001 # The port used to broadcast the server's location (UDP)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CHOSEN_NAMES_FILE = os.path.join(BASE_DIR, "chosen names", "allowed names.txt")
+RECENT_CLIENT_DIR = os.path.join(BASE_DIR, "recent client")
 
 # Set this to True to block clients if their code has been altered or renamed.
 # Set to False to allow any client connection regardless of file hash.
@@ -38,6 +41,8 @@ clients = []           # Keeps track of all connected client dictionaries
 displayed_clients = [] # Stores list of active clients currently rendered in the GUI
 user_reports = []      # Log of reported policy/abuse incidents
 FORBIDDEN_WORDS = []   # List of words loaded from the blocklist file
+ALLOWED_NAME_OPTIONS = []
+ALLOWED_CLIENT_HASHES = set()
 
 # ------------------------------------------------------------------------------
 # PROGRAMMATIC GENERATION OF 100 MEMES (2019-2026) & EMOJIS
@@ -82,9 +87,13 @@ for i in range(1, 21):
 # ------------------------------------------------------------------------------
 def get_expected_client_hash():
     """Computes unique SHA-256 fingerprint of client file with normalization."""
-    filename = "client code 2.py"
-    if not os.path.exists(filename) and os.path.exists("client.py"):
-        filename = "client.py"
+    candidate_paths = [
+        os.path.join(BASE_DIR, "client code 2.py"),
+        os.path.join(BASE_DIR, "client.py"),
+    ]
+    filename = next((path for path in candidate_paths if os.path.exists(path)), None)
+    if not filename:
+        return "DEFAULT_IDLE_CLIENT_TOKEN_v3.0"
     try:
         with open(filename, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
@@ -94,6 +103,19 @@ def get_expected_client_hash():
         return hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
     except Exception:
         return "DEFAULT_IDLE_CLIENT_TOKEN_v3.0"
+
+
+def calculate_normalized_file_hash(filename):
+    """Returns the normalized SHA-256 hash for a text file."""
+    try:
+        with open(filename, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.rstrip() for line in normalized.split("\n")]
+        normalized_content = "\n".join(lines).strip()
+        return hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
 
 EXPECTED_HASH = get_expected_client_hash()
 
@@ -122,6 +144,68 @@ def load_forbidden_words(filename="blocklist.txt"):
         except Exception as e:
             log_server_event(f"Could not generate template blocklist: {e}")
     FORBIDDEN_WORDS = loaded_words
+
+
+def load_allowed_names(filename=CHOSEN_NAMES_FILE):
+    """Loads approved display names from a text file."""
+    global ALLOWED_NAME_OPTIONS
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    allowed_names = []
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                for line in f:
+                    entry = line.strip()
+                    if entry and not entry.startswith("#"):
+                        allowed_names.append(entry)
+        except Exception as e:
+            log_server_event(f"Error reading allowed names: {e}")
+    else:
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write("# One approved username per line\nUser\nGuest\nPlayer\n")
+            allowed_names = ["User", "Guest", "Player"]
+        except Exception as e:
+            log_server_event(f"Could not generate allowed names file: {e}")
+    ALLOWED_NAME_OPTIONS = allowed_names
+
+
+def load_recent_client_hashes(folder=RECENT_CLIENT_DIR):
+    """Loads approved client hashes from files saved in the recent client folder."""
+    global ALLOWED_CLIENT_HASHES
+    os.makedirs(folder, exist_ok=True)
+    collected_hashes = set()
+    for root, _, files in os.walk(folder):
+        for filename in files:
+            if not filename.lower().endswith(".py"):
+                continue
+            file_path = os.path.join(root, filename)
+            file_hash = calculate_normalized_file_hash(file_path)
+            if file_hash:
+                collected_hashes.add(file_hash)
+    if not collected_hashes:
+        collected_hashes.add(get_expected_client_hash())
+    ALLOWED_CLIENT_HASHES = collected_hashes
+
+
+def name_is_available(candidate_name, exclude_client=None):
+    """Checks whether a display name is allowed and not already in use."""
+    requested = candidate_name.strip()
+    if not requested:
+        return False, "empty"
+
+    if ALLOWED_NAME_OPTIONS:
+        allowed = {item.lower() for item in ALLOWED_NAME_OPTIONS}
+        if requested.lower() not in allowed:
+            return False, "not_allowed"
+
+    for client in clients:
+        if client is exclude_client:
+            continue
+        if client["status"] != "offline" and client["name"].lower() == requested.lower():
+            return False, "taken"
+
+    return True, "ok"
 
 
 def advanced_normalize(text):
@@ -223,7 +307,10 @@ def update_user_lists():
     for client in list(clients):
         if client["status"] != "offline" and client["socket"]:
             members = [
-                {"name": c["name"]}
+                {
+                    "name": c["name"],
+                    "previous_names": list(c.get("name_history", []))
+                }
                 for c in clients
                 if c["status"] != "offline"
             ]
@@ -286,31 +373,35 @@ def handle_client(client_socket, address):
         client_socket.close()
         return
 
+    load_allowed_names()
+    load_recent_client_hashes()
+
     client_hash = handshake.get("hash", "")
-    if STRICT_HASH_CHECK:
-        if EXPECTED_HASH == "DEFAULT_IDLE_CLIENT_TOKEN_v3.0":
-            log_server_event("[SECURITY] Client source file absent. Bypassing check.")
-        elif client_hash != EXPECTED_HASH:
-            log_server_event(f"[SECURITY] Rejected connection at {address[0]} - Hash mismatch.")
-            send_packet(client_socket, {"type": "reject_integrity"})
-            client_socket.close()
-            return
-    else:
-        if EXPECTED_HASH != "DEFAULT_IDLE_CLIENT_TOKEN_v3.0" and client_hash != EXPECTED_HASH:
-            log_server_event(f"[INFO] Hash mismatch detected from {address[0]} (ignored by security config).")
+    if client_hash not in ALLOWED_CLIENT_HASHES:
+        log_server_event(f"[SECURITY] Rejected connection at {address[0]} - client code not in recent client folder.")
+        send_packet(client_socket, {"type": "reject_integrity", "reason": "client_not_approved"})
+        client_socket.close()
+        return
 
     name = handshake.get("name", "Unknown").strip()
 
     # Reject empty or whitespace-only names during registration handshake
     if not name:
         log_server_event(f"[SECURITY] Rejected connection at {address[0]} - Handshake contains empty name.")
-        send_packet(client_socket, {"type": "kicked_policy"})
+        send_packet(client_socket, {"type": "name_rejected", "reason": "empty"})
         client_socket.close()
         return
 
     if contains_forbidden_words(name):
         log_server_event(f"[MODERATION] Blocked registration - Offensive name: '{name}'")
-        send_packet(client_socket, {"type": "kicked_policy"})
+        send_packet(client_socket, {"type": "name_rejected", "reason": "blocked"})
+        client_socket.close()
+        return
+
+    is_available, reason = name_is_available(name)
+    if not is_available:
+        log_server_event(f"[SECURITY] Rejected connection at {address[0]} - name '{name}' unavailable ({reason}).")
+        send_packet(client_socket, {"type": "name_taken", "name": name, "reason": reason, "allowed": ALLOWED_NAME_OPTIONS})
         client_socket.close()
         return
 
@@ -367,6 +458,14 @@ def handle_client(client_socket, address):
         
         packet_type = packet.get("type")
         current_time = time.time()
+        allowed_packet_types = {"message", "dm", "name_change", "report", "file_share"}
+        if packet_type not in allowed_packet_types:
+            log_server_event(f"[SECURITY] Rejected unexpected packet type from @{client['name']}: {packet_type}")
+            send_packet(client_socket, {
+                "type": "system",
+                "content": "[SECURITY] Unsupported client packet was rejected.\n"
+            })
+            continue
 
         if packet_type == "message":
             if current_time < client.get("mute_until", 0):
@@ -445,32 +544,41 @@ def handle_client(client_socket, address):
             # Reject empty or whitespace-only names during name change requests
             if not new_name:
                 send_packet(client_socket, {
-                    "type": "system",
-                    "content": "SYSTEM: Name change rejected. Username cannot be empty.\n"
+                    "type": "name_rejected",
+                    "reason": "empty"
                 })
             elif contains_forbidden_words(new_name):
                 send_packet(client_socket, {
-                    "type": "system",
-                    "content": "SYSTEM: Name change rejected.\n"
+                    "type": "name_rejected",
+                    "reason": "blocked"
                 })
             else:
-                old_name = client["name"]
-                if old_name != new_name:
-                    if old_name not in client["name_history"]:
-                        client["name_history"].append(old_name)
-                    client["name"] = new_name
-                    log_server_event(f"* {old_name} changed name to {new_name}")
-                    broadcast_global({
-                        "type": "system",
-                        "content": f"[NICKNAME] {old_name} changed their nickname to {new_name}\n"
+                is_available, reason = name_is_available(new_name, exclude_client=client)
+                if not is_available:
+                    send_packet(client_socket, {
+                        "type": "name_taken",
+                        "name": new_name,
+                        "reason": reason,
+                        "allowed": ALLOWED_NAME_OPTIONS
                     })
-                    send_packet(client_socket, {"type": "name_changed", "name": new_name})
-                    update_user_lists()
-                    try:
-                        if window.winfo_exists():
-                            window.after(0, update_client_list_gui)
-                    except Exception:
-                        pass
+                else:
+                    old_name = client["name"]
+                    if old_name != new_name:
+                        if old_name not in client["name_history"]:
+                            client["name_history"].append(old_name)
+                        client["name"] = new_name
+                        log_server_event(f"* {old_name} changed name to {new_name}")
+                        broadcast_global({
+                            "type": "system",
+                            "content": f"[NICKNAME] {old_name} changed their nickname to {new_name}\n"
+                        })
+                        send_packet(client_socket, {"type": "name_changed", "name": new_name})
+                        update_user_lists()
+                        try:
+                            if window.winfo_exists():
+                                window.after(0, update_client_list_gui)
+                        except Exception:
+                            pass
 
         elif packet_type == "report":
             target_user = packet.get("target", "").strip()
@@ -527,6 +635,8 @@ def start_network_server():
         return
 
     load_forbidden_words()
+    load_allowed_names()
+    load_recent_client_hashes()
     threading.Thread(target=broadcast_presence, daemon=True).start()
 
     while True:
@@ -574,8 +684,28 @@ def open_web_redirect_panel():
     url = simpledialog.askstring("Open Web Link", f"Enter web link to open on {target_client['name']}'s browser:", initialvalue="https://")
     if url:
         url = url.strip()
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+            url = f"https://{url.lstrip('/') }"
         send_packet(target_client["socket"], {"type": "prank_url", "url": url})
         log_server_event(f"[ADMIN] Opened web link ({url}) on client: {target_client['name']}")
+
+
+def play_sound_on_selected_user():
+    """Sends a sound alert packet to the selected client computer."""
+    selected = client_listbox.curselection()
+    if not selected:
+        messagebox.showwarning("Admin Action", "Select an active client first.")
+        return
+
+    target_client = displayed_clients[selected[0]]
+    if target_client["status"] == "offline":
+        messagebox.showwarning("Admin Action", "Selected client is currently offline.")
+        return
+
+    sound_style = simpledialog.askstring("Play Sound", "Enter sound type (beep, error, triple, alarm):", initialvalue="beep")
+    if sound_style:
+        send_packet(target_client["socket"], {"type": "prank_sound", "style": sound_style.strip().lower()})
+        log_server_event(f"[ADMIN] Played sound ({sound_style}) on client: {target_client['name']}")
 
 
 def mute_selected_user():
@@ -703,6 +833,7 @@ def show_user_context_menu(event):
             menu = tk.Menu(window, tearoff=0, bg=BG_BOX, fg=FG_TEXT, activebackground=ACCENT_BLUE, activeforeground="white")
             menu.add_command(label="Kick User", command=kick_selected_user)
             menu.add_command(label="Mute User", command=mute_selected_user)
+            menu.add_command(label="Play Sound", command=play_sound_on_selected_user)
             menu.add_command(label="Send Fullscreen Overlay", command=open_prank_selection_panel)
             menu.add_command(label="Web Link Redirect", command=open_web_redirect_panel)
             menu.post(event.x_root, event.y_root)

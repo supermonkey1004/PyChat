@@ -1,0 +1,18 @@
+# One approved username per line
+Toby
+Nicko
+Ben
+Sam
+Cez
+Abinav
+Oliver
+Billy
+Dylan
+Nathan
+Alex
+Kai
+Adam
+Joel
+Taken 1
+Taken 2
+
