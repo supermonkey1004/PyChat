@@ -519,9 +519,37 @@ def show_peer_context_menu(event):
         peers_listbox.select_set(index)
         
         # Resolve targeted peer name
+        #
+        # ====================== LEARNING EXERCISE ======================
+        #
+        # BUG (GitHub Issue #9): The original code used substring matching:
+        #
+        #     if m["name"] in line:
+        #
+        # Python's `in` operator checks if the left string appears ANYWHERE
+        # inside the right string. For example:
+        #
+        #     >>> "Al" in "    Alice"
+        #     True          # <-- This is the bug!
+        #
+        # So if users "Al" and "Alice" are both online, clicking on "Alice"
+        # could match "Al" first (because "Al" is a substring of "Alice").
+        #
+        # YOUR TASK: Replace the condition below (marked FIXME) so that it
+        # uses EXACT matching instead of substring matching.
+        #
+        # HINT: Look at line 592 to see how names are inserted into the
+        # listbox. The variable `line` has already been .strip()-ed on
+        # line 447. What comparison would match the name exactly?
+        #
+        # BONUS: Can you think of another approach that doesn't loop at all?
+        # (Hint: `line` after stripping IS the name — you could look it up
+        # directly in room_members instead of looping.)
+        #
+        # ===============================================================
         target_name = None
         for m in room_members:
-            if m["name"] in line:
+            if m["name"] in line:  # FIXME: This is the bug! Change this line.
                 target_name = m["name"]
                 break
                 
