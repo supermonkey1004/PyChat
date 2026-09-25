@@ -1,1 +1,3 @@
 blocklist.txt
+__pycache__/client code.cpython-314.pyc
+__pycache__/server code.cpython-314.pyc

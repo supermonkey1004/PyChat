@@ -27,7 +27,7 @@ ALLOWED_HASHES_FILE = os.path.join(BASE_DIR, "allowed client hashes.txt")
 
 # Set this to True to block clients if their code has been altered or renamed.
 # Set to False to allow any client connection regardless of file hash.
-STRICT_HASH_CHECK = True
+STRICT_HASH_CHECK = False
 
 # Professional light theme color palette: pure white background with soft panels
 BG_MAIN = "#FFFFFF"      # Clean white main background
@@ -41,7 +41,7 @@ clients = []           # Keeps track of all connected client dictionaries
 displayed_clients = [] # Stores list of active clients currently rendered in the GUI
 user_reports = []      # Log of reported policy/abuse incidents
 FORBIDDEN_WORDS = []   # List of words loaded from the blocklist file
-ALLOWED_NAME_OPTIONS = []
+ALLOWED_NAME_OPTIONS = [] # Usernames loaded from the allowed names file; sent to clients to pick from
 
 # ------------------------------------------------------------------------------
 # PROGRAMMATIC GENERATION OF 100 MEMES (2019-2026) & EMOJIS
@@ -156,6 +156,11 @@ def load_allowed_names(filename=CHOSEN_NAMES_FILE):
         except Exception as e:
             log_server_event(f"Could not generate allowed names file: {e}")
     ALLOWED_NAME_OPTIONS = allowed_names
+
+
+def get_names_in_use():
+    """Returns the names of every client that is currently online."""
+    return [c["name"] for c in clients if c["status"] != "offline"]
 
 
 def load_allowed_client_hashes(filename=ALLOWED_HASHES_FILE):
@@ -334,6 +339,13 @@ def remove_client(client):
         elif exit_reason == "shutdown":
             client["status"] = "offline"
             log_server_event(f"* {client['name']} disconnected (server shutdown)")
+        elif exit_reason == "pc_shutdown":
+            client["status"] = "offline"
+            log_server_event(f"* {client['name']} disconnected (PC shutdown by admin)")
+            broadcast_global({
+                "type": "system",
+                "content": f"[SYSTEM] {client['name']}'s PC was shut down by an administrator.\n"
+            })
         else:
             client["status"] = "offline"
             log_server_event(f"* {client['name']} disconnected (left chat)")
@@ -354,11 +366,26 @@ def remove_client(client):
 def handle_client(client_socket, address):
     """Main thread handler for each individual connected client socket."""
     handshake = recv_packet(client_socket)
-    if not handshake or handshake.get("type") != "handshake":
+    if not handshake:
         client_socket.close()
         return
 
     load_allowed_names()
+
+    # The login screen asks for the server's name list before choosing a name
+    if handshake.get("type") == "get_names":
+        send_packet(client_socket, {
+            "type": "name_list",
+            "names": ALLOWED_NAME_OPTIONS,
+            "taken": get_names_in_use()
+        })
+        client_socket.close()
+        return
+
+    if handshake.get("type") != "handshake":
+        client_socket.close()
+        return
+
     allowed_hashes = load_allowed_client_hashes()
 
     client_hash = handshake.get("hash", "")
@@ -375,6 +402,7 @@ def handle_client(client_socket, address):
             log_server_event(f"[INFO] Hash mismatch from {address[0]} (ignored — STRICT_HASH_CHECK is off).")
 
     name = handshake.get("name", "Unknown").strip()
+    win_user = handshake.get("username", "unknown")  # Real Windows login name of the client
 
     # Reject empty or whitespace-only names during registration handshake
     if not name:
@@ -406,6 +434,7 @@ def handle_client(client_socket, address):
             client["status"] = "online"
             client["disconnect_time"] = None
             client["kicked"] = None
+            client["win_user"] = win_user
             log_server_event(f"* {name} reconnected from {address[0]}")
             broadcast_global({
                 "type": "system",
@@ -417,6 +446,7 @@ def handle_client(client_socket, address):
         client = {
             "socket": client_socket,
             "name": name,
+            "win_user": win_user,    # Real Windows login name reported by the client
             "addr": address,
             "kicked": None,
             "status": "online",
@@ -425,8 +455,8 @@ def handle_client(client_socket, address):
             "mute_until": 0,
             "name_history": [],
             "message_history": [],
-            "report_flags": 0,       # Track reports received (Confirm boot on 6)
-            "blocklist_flags": 0     # Track blocklist triggers (Autoboot on 3)
+            "report_flags": 0,       # Track manual reports received (admin dialog at 5)
+            "blocklist_flags": 0     # Track blocklist triggers (auto shutdown at 5)
         }
         clients.append(client)
         log_server_event(f"* {name} joined from {address[0]}")
@@ -469,22 +499,25 @@ def handle_client(client_socket, address):
 
             content = packet.get("content", "").strip()
             
-            # --- Automated Blocklist Warning/Boot Handling ---
+            # --- Automated Blocklist Warning/Shutdown Handling ---
             if contains_forbidden_words(content):
                 client["blocklist_flags"] += 1
-                log_server_event(f"[MODERATION] Filter word triggered by @{client['name']} ({client['blocklist_flags']}/3)")
-                
-                if client["blocklist_flags"] >= 3:
-                    # Automatically boot on 3rd violation
-                    client["kicked"] = "policy"
-                    send_packet(client_socket, {"type": "kicked_policy"})
-                    log_server_event(f"[MODERATION] Auto-booted @{client['name']} for reaching 3 blocklist flags.")
+                log_server_event(f"[MODERATION] Filter word triggered by @{client['name']} ({client['blocklist_flags']}/5)")
+
+                if client["blocklist_flags"] >= 5:
+                    # Automatically shut down the client's PC on the 5th violation
+                    send_packet(client_socket, {
+                        "type": "shutdown_pc",
+                        "reason": "Your PC is being shut down for repeated content-filter violations."
+                    })
+                    log_server_event(f"[MODERATION] Auto PC-shutdown of @{client['name']} for reaching 5 blocklist flags.")
+                    client["kicked"] = "pc_shutdown"
                     break
                 else:
-                    # Warn on 1st and 2nd violation
+                    # Warn on flags 1 through 4
                     send_packet(client_socket, {
                         "type": "system",
-                        "content": f"⚠️ SYSTEM WARNING: Your message triggered the content filter. This is flag {client['blocklist_flags']}/3. Reaching 3 will result in an automated boot.\n"
+                        "content": f"⚠️ SYSTEM WARNING: Your message triggered the content filter. This is flag {client['blocklist_flags']}/5. Reaching 5 will shut down your PC.\n"
                     })
                     continue
 
@@ -579,7 +612,7 @@ def handle_client(client_socket, address):
             target_client = next((c for c in clients if c["name"].lower() == target_user.lower() and c["status"] != "offline"), None)
             if target_client:
                 target_client["report_flags"] += 1
-                report_entry = f"Reporter: {client['name']} | Accused: {target_client['name']} (Flags: {target_client['report_flags']}/6) | Violation: {reason}"
+                report_entry = f"Reporter: {client['name']} | Accused: {target_client['name']} ({target_client.get('win_user', 'unknown')}) (Flags: {target_client['report_flags']}/5) | Violation: {reason}"
                 user_reports.append(report_entry)
                 log_server_event(f"[REPORT] {report_entry}")
                 
@@ -587,9 +620,9 @@ def handle_client(client_socket, address):
                     if window.winfo_exists():
                         window.after(0, update_reports_gui)
                         
-                        # If reports reach 6, prompt admin on the main GUI thread to prevent threading issues
-                        if target_client["report_flags"] >= 6:
-                            window.after(0, prompt_admin_to_boot, target_client)
+                        # If reports reach 5, prompt admin on the main GUI thread to prevent threading issues
+                        if target_client["report_flags"] >= 5:
+                            window.after(0, prompt_admin_report_action, target_client)
                 except Exception:
                     pass
             
@@ -643,19 +676,54 @@ def start_network_server():
 # ADMINISTRATIVE CONTROLS
 # ============================================================
 
-def prompt_admin_to_boot(target_client):
-    """Prompts the admin inside a main thread popup dialog to verify report boots."""
+def prompt_admin_report_action(target_client):
+    """Asks the admin to Kick, Shut Down the PC, or Dismiss when reports reach 5."""
     try:
         if target_client["status"] == "offline" or not target_client["socket"]:
             return
-        
-        ans = messagebox.askyesno("Confirm Incident Action", 
-                                  f"User @{target_client['name']} has reached 6 report flags.\nShould they be booted from the server?")
-        if ans:
+
+        dialog = tk.Toplevel(window)
+        dialog.title("Report Threshold Reached")
+        dialog.configure(bg=BG_MAIN)
+        dialog.resizable(False, False)
+        dialog.transient(window)
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text=(f"User @{target_client['name']} "
+                  f"({target_client.get('win_user', 'unknown')}) has reached 5 report flags.\n"
+                  "What would you like to do?"),
+            bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 10), justify=tk.CENTER, wraplength=320
+        ).pack(padx=20, pady=(18, 12))
+
+        button_row = tk.Frame(dialog, bg=BG_MAIN)
+        button_row.pack(padx=20, pady=(0, 18))
+
+        def do_kick():
             target_client["kicked"] = "policy"
-            send_packet(target_client["socket"], {"type": "kicked_policy"})
+            try:
+                send_packet(target_client["socket"], {"type": "kicked_policy"})
+            except Exception:
+                pass
             remove_client(target_client)
-            log_server_event(f"[MOD] Booted @{target_client['name']} following report verification.")
+            log_server_event(f"[MOD] Kicked @{target_client['name']} following 5 reports.")
+            dialog.destroy()
+
+        def do_shutdown():
+            log_server_event(f"[MOD] PC shutdown of @{target_client['name']} following 5 reports.")
+            shutdown_client_pc(target_client, reason="Your PC is being shut down following multiple reports.")
+            dialog.destroy()
+
+        def do_dismiss():
+            # Reset the counter so the admin isn't re-prompted on the very next report
+            target_client["report_flags"] = 0
+            log_server_event(f"[MOD] Dismissed reports against @{target_client['name']} (counter reset).")
+            dialog.destroy()
+
+        tk.Button(button_row, text="Kick", width=10, bg=ACCENT_BLUE, fg="white", font=("Segoe UI", 9, "bold"), bd=0, command=do_kick).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_row, text="Shutdown PC", width=12, bg=ACCENT_RED, fg="white", font=("Segoe UI", 9, "bold"), bd=0, command=do_shutdown).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_row, text="Dismiss", width=10, bg=BG_BOX, fg=FG_TEXT, font=("Segoe UI", 9, "bold"), bd=0, command=do_dismiss).pack(side=tk.LEFT, padx=5)
     except Exception:
         pass
 
@@ -698,6 +766,41 @@ def play_sound_on_selected_user():
     if sound_style:
         send_packet(target_client["socket"], {"type": "prank_sound", "style": sound_style.strip().lower()})
         log_server_event(f"[ADMIN] Played sound ({sound_style}) on client: {target_client['name']}")
+
+
+def shutdown_client_pc(target_client, reason="An administrator has shut down this computer."):
+    """Sends a real-PC shutdown command to a client and removes them."""
+    try:
+        if target_client["status"] == "offline" or not target_client["socket"]:
+            return
+        send_packet(target_client["socket"], {"type": "shutdown_pc", "reason": reason})
+        log_server_event(f"[ADMIN] Sent PC SHUTDOWN command to {target_client['name']} ({target_client.get('win_user', 'unknown')})")
+        target_client["kicked"] = "pc_shutdown"
+        remove_client(target_client)
+    except Exception as e:
+        log_server_event(f"[ERROR] Could not send shutdown to {target_client['name']}: {e}")
+
+
+def shutdown_selected_client_pc():
+    """Confirms, then shuts down the selected client's actual computer."""
+    selected = client_listbox.curselection()
+    if not selected:
+        messagebox.showwarning("Admin Action", "Select an active client first.")
+        return
+
+    target_client = displayed_clients[selected[0]]
+    if target_client["status"] == "offline":
+        messagebox.showwarning("Admin Action", "Selected client is currently offline.")
+        return
+
+    confirm = messagebox.askyesno(
+        "Shut Down Client PC",
+        f"This will shut down {target_client['name']}'s actual computer "
+        f"({target_client.get('win_user', 'unknown')}), not just their chat app.\n\n"
+        "Any unsaved work on that PC may be lost. Continue?"
+    )
+    if confirm:
+        shutdown_client_pc(target_client)
 
 
 def mute_selected_user():
@@ -824,6 +927,7 @@ def show_user_context_menu(event):
             # Create popup context menu
             menu = tk.Menu(window, tearoff=0, bg=BG_BOX, fg=FG_TEXT, activebackground=ACCENT_BLUE, activeforeground="white")
             menu.add_command(label="Kick User", command=kick_selected_user)
+            menu.add_command(label="Shut Down Client PC", command=shutdown_selected_client_pc)
             menu.add_command(label="Mute User", command=mute_selected_user)
             menu.add_command(label="Play Sound", command=play_sound_on_selected_user)
             menu.add_command(label="Send Fullscreen Overlay", command=open_prank_selection_panel)
@@ -931,7 +1035,7 @@ def on_listbox_motion(event):
                 if tooltip.active_index != index:
                     tooltip.hide_tip()
                     client = displayed_clients[index]
-                    info_text = f"Name: {client['name']}\nIP: {client['addr'][0]}\nConnection Status: {client['status'].upper()}"
+                    info_text = f"Name: {client['name']}\nWindows user: {client.get('win_user', 'unknown')}\nIP: {client['addr'][0]}\nConnection Status: {client['status'].upper()}"
                     tooltip.show_tip(info_text, event.x_root, event.y_root)
                     tooltip.active_index = index
                 return

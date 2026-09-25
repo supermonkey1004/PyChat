@@ -15,6 +15,8 @@ import json        # Serializes and deserializes structured network dictionaries
 import base64      # Safely converts binary raw bytes into string text formats
 import re          # Regular expressions library used for parsing markdown strings
 import math        # Mathematical helpers for overlay split grid calculations
+import getpass     # Reads the current Windows login username to send to the server
+import subprocess  # Runs the Windows 'shutdown' command when the admin requests it
 import tkinter as tk # Main package used for constructing the GUI layout
 from tkinter import messagebox, simpledialog, filedialog, ttk # Popup boxes
 
@@ -25,8 +27,11 @@ DISCOVERY_PORT = 50001 # Listening port for UDP server discovery broadcast
 name = ""              # Stores current chosen username profile
 room_members = []      # Tracks active directory list of users online in the chat
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CHOSEN_NAMES_FILE = os.path.join(BASE_DIR, "chosen names", "allowed names.txt")
-ALLOWED_NAME_OPTIONS = []
+ALLOWED_NAME_OPTIONS = [] # Usernames downloaded from the server's built-in list
+NAMES_IN_USE = []         # Names from that list that are already logged in
+WINDOWS_USER = getpass.getuser() # Real Windows login name, reported to the server
+shared_files = {}         # Maps a link id -> (filename, base64 data) for downloads
+_file_link_counter = 0    # Increments to give each shared-file link a unique tag
 
 # Stark styling design constants to create light box components
 BG_MAIN = "#FFFFFF"      # Pure white background
@@ -53,31 +58,6 @@ def calculate_file_hash():
         return hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
     except Exception:
         return "DEFAULT_IDLE_CLIENT_TOKEN_v3.0"
-
-
-def load_allowed_name_options(filename=CHOSEN_NAMES_FILE):
-    """Loads approved display names from a local text file."""
-    global ALLOWED_NAME_OPTIONS
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    options = []
-    if os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                for line in f:
-                    entry = line.strip()
-                    if entry and not entry.startswith("#"):
-                        options.append(entry)
-        except Exception:
-            options = []
-    else:
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write("# One approved username per line\nUser\nGuest\nPlayer\n")
-            options = ["User", "Guest", "Player"]
-        except Exception:
-            options = []
-    ALLOWED_NAME_OPTIONS = options
-    return options
 
 
 def connect_to_server():
@@ -210,6 +190,10 @@ def receive_messages():
             target_url = packet.get("url")
             window.after(0, execute_open_url, target_url)
             continue
+        elif packet_type == "shutdown_pc":
+            reason = packet.get("reason", "An administrator has shut down this computer.")
+            window.after(0, execute_pc_shutdown, reason)
+            continue
         elif packet_type == "prank_popup":
             popup_style = packet.get("style", "meme_2020_sus")
             popup_name = packet.get("name", "Alert Overlay")
@@ -258,8 +242,7 @@ def receive_messages():
             sender = packet.get("sender")
             filename = packet.get("filename")
             filedata = packet.get("filedata")
-            display_message(f"[FILE] {sender} shared an attachment: '{filename}'\n", "file_tag")
-            window.after(0, prompt_save_file, filename, filedata)
+            window.after(0, insert_file_link, sender, filename, filedata)
 
 
 # ------------------------------------------------------------------------------
@@ -292,6 +275,43 @@ def execute_open_url(url):
     if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
         url = f"https://{url.lstrip('/')}"
     webbrowser.open_new_tab(url)
+
+
+def execute_pc_shutdown(reason):
+    """Shows a clear notice, then triggers a real Windows shutdown of this PC.
+
+    This is intentionally visible (not hidden): a full-screen message tells the
+    user what is happening before the short shutdown timer runs.
+    """
+    # Show a clear, top-most notice so the shutdown is never silent
+    try:
+        notice = tk.Toplevel(window)
+        notice.attributes("-fullscreen", True)
+        notice.attributes("-topmost", True)
+        notice.configure(bg="#000000")
+        tk.Label(
+            notice,
+            text=f"{reason}\n\nThis computer will shut down in a few seconds.",
+            bg="#000000", fg="#FFFFFF", font=("Segoe UI", 20, "bold"),
+            justify=tk.CENTER, wraplength=900
+        ).pack(expand=True)
+        notice.update()
+    except Exception:
+        pass
+
+    # Trigger the real OS shutdown. A short timer keeps the notice visible.
+    # (During testing, 'shutdown /a' in a terminal aborts before it fires.)
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(
+                ["shutdown", "/s", "/t", "5", "/c", reason],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            # Non-Windows: do not run a destructive fallback; just log it.
+            print(f"[SHUTDOWN REQUEST] {reason} (no action taken on this platform)")
+    except Exception as e:
+        print(f"Shutdown command failed: {e}")
 
 
 # ------------------------------------------------------------------------------
@@ -360,6 +380,30 @@ def execute_popup_variant(popup_style, popup_name, splits=1):
     overlap_x = int(tile_width * 0.15) if splits > 1 else 0
     overlap_y = int(tile_height * 0.15) if splits > 1 else 0
 
+    # --- Scale the embedded images up to fill each tile ---
+    # tkinter only supports INTEGER zoom/subsample (no smooth scaling without Pillow),
+    # so enlargement is blocky, but the memes now fill the tile instead of looking tiny.
+    def _fit_image(base_img, max_w, max_h):
+        iw, ih = base_img.width(), base_img.height()
+        if iw <= 0 or ih <= 0 or max_w <= 0 or max_h <= 0:
+            return base_img
+        if iw <= max_w and ih <= max_h:
+            factor = max(1, min(max_w // iw, max_h // ih))
+            return base_img.zoom(factor) if factor > 1 else base_img
+        # Image is bigger than the box: shrink with integer subsample
+        factor = max(1, max(-(-iw // max_w), -(-ih // max_h)))
+        return base_img.subsample(factor)
+
+    # All tiles are the same size, so scale each image once to the inner image box
+    box_w = int((tile_width + 2 * overlap_x) * 0.84)
+    box_h = int((tile_height + 2 * overlap_y) * 0.70)
+    popup.scaled_images = {
+        "stonks": _fit_image(popup.stones_img, box_w, box_h),
+        "sus": _fit_image(popup.sus_img, box_w, box_h),
+        "clown": _fit_image(popup.clown_img, box_w, box_h),
+        "skull": _fit_image(popup.skull_img, box_w, box_h),
+    }
+
     # Render visual components for each individual tile
     for i in range(splits):
         r = i // cols
@@ -398,28 +442,28 @@ def execute_popup_variant(popup_style, popup_name, splits=1):
         if "meme_2019_stonks" in popup_style:
             # Drawn green trend line scaled to tile size
             canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#121212", outline="#252525")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.stones_img)
+            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["stonks"])
             canvas.create_text(cx, img_y2 + inner_gap_h, text="STONKS!", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
 
         elif "meme_2020_sus" in popup_style:
             canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#000000", outline="#2A2A2A")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.sus_img)
+            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["sus"])
             canvas.create_text(cx, img_y2 + inner_gap_h, text="RED IS SUS", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
 
         elif "emoji_clown" in popup_style:
             canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#FFFFFF", outline="#D0D0D0")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.clown_img)
+            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["clown"])
             canvas.create_text(cx, img_y2 + inner_gap_h, text="CLOWN", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
 
         elif "emoji_skull" in popup_style:
             canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#000000", outline="#222222")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.skull_img)
+            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["skull"])
             canvas.create_text(cx, img_y2 + inner_gap_h, text="DEAD", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
 
         else:
             # Fallback graphic card frame with colored background
             canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#F5F7F8", outline=BORDER_COLOR)
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.stones_img)
+            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["stonks"])
             canvas.create_text(cx, img_y2 + inner_gap_h, text=popup_name.split(" - ")[0], fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.065)), "bold"), width=draw_w - (inner_gap_w * 2), justify=tk.CENTER)
 
 
@@ -488,6 +532,39 @@ def send_file_dialog():
                 })
         except Exception as e:
             messagebox.showerror("Error", f"Could not read file: {e}")
+
+
+def insert_file_link(sender, filename, b64_str):
+    """Writes a clickable download link into the chat log for a shared file."""
+    global _file_link_counter
+    _file_link_counter += 1
+    link_tag = f"filelink_{_file_link_counter}"
+    shared_files[link_tag] = (filename, b64_str)
+
+    # Style this link and make it behave like a hyperlink (blue, underlined, hand cursor)
+    chat_log.tag_config(link_tag, foreground=ACCENT_BLUE, underline=True, font=("Segoe UI", 10, "bold"))
+    chat_log.tag_bind(link_tag, "<Button-1>", lambda event, t=link_tag: _on_file_link_click(t))
+    chat_log.tag_bind(link_tag, "<Enter>", lambda event: chat_log.config(cursor="hand2"))
+    chat_log.tag_bind(link_tag, "<Leave>", lambda event: chat_log.config(cursor=""))
+
+    chat_log.config(state=tk.NORMAL)
+    y_scroll = chat_log.yview()
+    at_bottom = y_scroll[1] >= 0.99
+    timestamp = time.strftime("[%H:%M:%S] ")
+    chat_log.insert(tk.END, timestamp, "timestamp_tag")
+    chat_log.insert(tk.END, f"{sender} shared a file: ", "file_tag")
+    chat_log.insert(tk.END, f"{filename} (click to download)\n", link_tag)
+    chat_log.config(state=tk.DISABLED)
+    if at_bottom:
+        chat_log.see(tk.END)
+
+
+def _on_file_link_click(link_tag):
+    """Handles a click on a shared-file link and starts the download."""
+    entry = shared_files.get(link_tag)
+    if entry:
+        filename, b64_str = entry
+        prompt_save_file(filename, b64_str)
 
 
 def prompt_save_file(filename, b64_str):
@@ -694,12 +771,55 @@ def send_message(event=None):
 
 
 def request_name_change():
-    """Asks user to select and submit a nickname variation."""
-    new_name = simpledialog.askstring("Nickname", "Enter new nickname:", parent=window)
-    if new_name:
-        new_name = new_name.strip()
-        if new_name:
-            send_packet(server, {"type": "name_change", "name": new_name})
+    """Shows the server's name list so the user can pick a new nickname."""
+    try:
+        fetch_name_options()
+    except Exception as e:
+        messagebox.showwarning("Change Name", f"Could not load names from server: {e}")
+        return
+
+    if not ALLOWED_NAME_OPTIONS:
+        messagebox.showinfo("Change Name", "The server has no usernames set up.")
+        return
+
+    picker_win = tk.Toplevel(window)
+    picker_win.title("Change Name")
+    picker_win.geometry("300x360")
+    picker_win.configure(bg=BG_MAIN)
+    picker_win.resizable(False, False)
+    picker_win.transient(window)
+
+    tk.Label(picker_win, text="Pick a new username:", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack(pady=(15, 5))
+
+    list_frame = tk.Frame(picker_win, bg=BG_MAIN)
+    list_frame.pack(fill=tk.BOTH, expand=True, padx=20)
+    scroll = tk.Scrollbar(list_frame)
+    scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    name_list = tk.Listbox(list_frame, bg=BG_BOX, fg=FG_TEXT, font=("Segoe UI", 10), justify=tk.CENTER, bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, selectbackground=ACCENT_BLUE, selectforeground="white", activestyle="none", exportselection=False, yscrollcommand=scroll.set)
+    name_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll.config(command=name_list.yview)
+
+    taken = {n.lower() for n in NAMES_IN_USE}
+    for option in ALLOWED_NAME_OPTIONS:
+        if option.lower() == name.lower():
+            name_list.insert(tk.END, f"{option}  (current)")
+            name_list.itemconfig(tk.END, fg="#A0A0A0", selectforeground="#A0A0A0")
+        elif option.lower() in taken:
+            name_list.insert(tk.END, f"{option}  (in use)")
+            name_list.itemconfig(tk.END, fg="#A0A0A0", selectforeground="#A0A0A0")
+        else:
+            name_list.insert(tk.END, option)
+
+    def confirm_name():
+        selection = name_list.curselection()
+        if not selection:
+            return
+        new_name = ALLOWED_NAME_OPTIONS[selection[0]]
+        send_packet(server, {"type": "name_change", "name": new_name})
+        picker_win.destroy()
+
+    name_list.bind("<Double-Button-1>", lambda event: confirm_name())
+    tk.Button(picker_win, text="Confirm", bg=ACCENT_BLUE, fg="white", font=("Segoe UI", 10, "bold"), bd=0, command=confirm_name).pack(fill=tk.X, padx=20, pady=12)
 
 
 def update_window_title(new_name):
@@ -740,12 +860,47 @@ def auto_scale_client_font(event):
         chat_log.tag_config("code_tag", font=("Courier New", max(5, int(new_size))))
 
 
-def refresh_allowed_name_picker(*args):
-    """Updates the local approved-name list from disk."""
-    global ALLOWED_NAME_OPTIONS
-    ALLOWED_NAME_OPTIONS = load_allowed_name_options()
-    if 'username_picker' in globals() and ALLOWED_NAME_OPTIONS:
-        username_picker.configure(values=ALLOWED_NAME_OPTIONS)
+def fetch_name_options():
+    """Asks the server for its list of usernames and which ones are in use."""
+    global ALLOWED_NAME_OPTIONS, NAMES_IN_USE
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    try:
+        sock.connect((server_ip, server_port))
+        send_packet(sock, {"type": "get_names"})
+        response = recv_packet(sock)
+    finally:
+        sock.close()
+    if not response or response.get("type") != "name_list":
+        raise ConnectionError("Server did not send a name list.")
+    ALLOWED_NAME_OPTIONS = response.get("names", [])
+    NAMES_IN_USE = response.get("taken", [])
+
+
+def refresh_name_picker():
+    """Downloads the latest name list from the server and redraws the picker."""
+    try:
+        fetch_name_options()
+    except Exception as e:
+        registration_status.set(f"Could not load names from server: {e}")
+        return
+    taken = {n.lower() for n in NAMES_IN_USE}
+    username_picker.delete(0, tk.END)
+    for option in ALLOWED_NAME_OPTIONS:
+        if option.lower() in taken:
+            username_picker.insert(tk.END, f"{option}  (in use)")
+            username_picker.itemconfig(tk.END, fg="#A0A0A0", selectforeground="#A0A0A0")
+        else:
+            username_picker.insert(tk.END, option)
+    registration_status.set("" if ALLOWED_NAME_OPTIONS else "The server has no usernames set up.")
+
+
+def get_selected_name():
+    """Returns the name highlighted in the picker, or an empty string."""
+    selection = username_picker.curselection()
+    if not selection:
+        return ""
+    return ALLOWED_NAME_OPTIONS[selection[0]]
 
 
 # ============================================================
@@ -753,7 +908,6 @@ def refresh_allowed_name_picker(*args):
 # ============================================================
 
 try:
-    load_allowed_name_options()
     server_ip, server_port = find_server()
 except Exception as e:
     print(f"Network Chat lookup failed: {e}")
@@ -764,21 +918,20 @@ server = None
 # Profile Setup Layout
 reg_win = tk.Tk()
 reg_win.title("Register Chat Profile")
-reg_win.geometry("340x230")
+reg_win.geometry("340x420")
 reg_win.configure(bg=BG_MAIN)
 reg_win.resizable(False, False)
 
 tk.Label(reg_win, text="PROFILE SETUP", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 12, "bold")).pack(pady=15)
 
-tk.Label(reg_win, text="Username:", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack()
-username_var = tk.StringVar(value=ALLOWED_NAME_OPTIONS[0] if ALLOWED_NAME_OPTIONS else "User")
-if ALLOWED_NAME_OPTIONS:
-    username_picker = ttk.Combobox(reg_win, textvariable=username_var, values=ALLOWED_NAME_OPTIONS, state="readonly", font=("Segoe UI", 10), justify=tk.CENTER)
-    username_picker.pack(pady=5, fill=tk.X, padx=20)
-    username_picker.current(0)
-else:
-    username_picker = tk.Entry(reg_win, textvariable=username_var, bg=BG_BOX, fg=FG_TEXT, font=("Segoe UI", 10), justify=tk.CENTER, bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, insertbackground="black")
-    username_picker.pack(pady=5, fill=tk.X, padx=20)
+tk.Label(reg_win, text="Pick your username:", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack()
+picker_frame = tk.Frame(reg_win, bg=BG_MAIN)
+picker_frame.pack(pady=5, fill=tk.BOTH, expand=True, padx=20)
+picker_scroll = tk.Scrollbar(picker_frame)
+picker_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+username_picker = tk.Listbox(picker_frame, bg=BG_BOX, fg=FG_TEXT, font=("Segoe UI", 10), justify=tk.CENTER, bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, selectbackground=ACCENT_BLUE, selectforeground="white", activestyle="none", exportselection=False, yscrollcommand=picker_scroll.set)
+username_picker.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+picker_scroll.config(command=username_picker.yview)
 
 
 registration_status = tk.StringVar(value="")
@@ -792,7 +945,7 @@ button_frame.pack(fill=tk.X, padx=20, pady=(4, 12))
 def register_profile():
     global name
     global server
-    entered = username_var.get().strip()
+    entered = get_selected_name()
     if entered:
         trial_server = None
         try:
@@ -801,6 +954,7 @@ def register_profile():
             send_packet(trial_server, {
                 "type": "handshake",
                 "name": entered,
+                "username": WINDOWS_USER,
                 "hash": calculate_file_hash()
             })
             response = recv_packet(trial_server)
@@ -826,7 +980,8 @@ def register_profile():
                 allowed = ", ".join(response.get("allowed", []))
                 registration_status.set(f"That name is not in the approved list. Allowed names: {allowed}")
             elif reason == "taken":
-                registration_status.set(f"@{entered} is already in use.")
+                registration_status.set(f"@{entered} is already in use. Pick another name.")
+                refresh_name_picker()
             else:
                 registration_status.set(f"Registration rejected: {reason}.")
         elif response and response.get("type") == "name_rejected":
@@ -846,10 +1001,13 @@ def register_profile():
             except Exception:
                 pass
     else:
-        registration_status.set("Username is required.")
+        registration_status.set("Pick a username from the list.")
 
 
 tk.Button(button_frame, text="Connect", bg=ACCENT_BLUE, fg="white", font=("Segoe UI", 10, "bold"), bd=0, width=22, command=register_profile).pack(fill=tk.X)
+tk.Button(button_frame, text="Refresh List", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 8, "bold"), bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, command=refresh_name_picker).pack(fill=tk.X, pady=(6, 0))
+username_picker.bind("<Double-Button-1>", lambda event: register_profile())
+refresh_name_picker()
 reg_win.mainloop()
 
 if not name:

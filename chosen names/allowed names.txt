@@ -3,8 +3,8 @@ Toby
 Nicko
 Ben
 Sam
-Cez
-Abinav
+Cezary
+Abhinav
 Oliver
 Billy
 Dylan
@@ -13,9 +13,5 @@ Alex
 Kai
 Adam
 Joel
-Taken 1
-Taken 2
 User
 Guest
-
-
