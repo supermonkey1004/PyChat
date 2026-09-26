@@ -28,7 +28,7 @@ def existing_hashes():
 def main():
     if len(sys.argv) < 3:
         print("Usage: python3 add_client_hash.py <client_file> <description>")
-        print('Example: python3 add_client_hash.py "client code 2.py" "Release v1.0"')
+        print('Example: python3 add_client_hash.py "client code.py" "Release v1.0"')
         sys.exit(1)
 
     filepath = sys.argv[1]

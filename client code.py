@@ -304,7 +304,7 @@ def execute_pc_shutdown(reason):
     try:
         if sys.platform.startswith("win"):
             subprocess.run(
-                ["shutdown", "/s", "/t", "5", "/c", reason],
+                ["shutdown", "/s", "/t", "5","/c",reason],
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
         else:

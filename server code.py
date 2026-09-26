@@ -49,12 +49,9 @@ ALLOWED_NAME_OPTIONS = [] # Usernames loaded from the allowed names file; sent t
 # Populating exactly 100 entries programmatically to prevent file truncation
 PRANK_DATABASE = []
 
-years = [2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+years = [2026]
 memes = [
-    "Stonks Chart", "Area 51 Naruto Run", "Woman Yelling at Cat", "Surprised Pikachu",
-    "Coffin Dance", "Trade Offer Deal", "GigaChad Jawline", "It's Corn!", "Grimace Shake Drips",
-    "Chill Guy Posture", "Mewing Silence Gesture", "Demure Boundaries Grid", "Subway Splitscreen",
-    "Brainrot Level Max", "Quantum CPU Grid Alert", "Neural Link Brain Wave", "End of Internet Warning"
+    "You smell", "You suck at coding", "You've been hacked"
 ]
 emojis = [
     "Clown Face", "Suspicious Side-Eye", "Skull Face (Dead)", "Angry Red Face",
@@ -842,7 +839,7 @@ def open_prank_selection_panel():
     panel.configure(bg=BG_MAIN)
     panel.resizable(False, False)
 
-    tk.Label(panel, text="Search & Filter Overlays (100 Themes 2019-2026):", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 2))
+    tk.Label(panel, text="Search & Filter Overlays (100 Themes):", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 2))
     
     search_var = tk.StringVar()
     search_entry = tk.Entry(panel, textvariable=search_var, bg=BG_BOX, fg=FG_TEXT, insertbackground="black", bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, font=("Segoe UI", 10))
