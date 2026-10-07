@@ -45,7 +45,18 @@ def main():
         print("This hash is already in allowed client hashes.txt")
         return
 
+    # Make sure we start on a fresh line: if the file exists and does not already
+    # end with a newline, the hash would otherwise be glued onto the last line
+    # (e.g. a comment), and the server would skip it.
+    needs_newline = False
+    if os.path.exists(HASHES_FILE) and os.path.getsize(HASHES_FILE) > 0:
+        with open(HASHES_FILE, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_newline = f.read(1) != b"\n"
+
     with open(HASHES_FILE, "a", encoding="utf-8") as f:
+        if needs_newline:
+            f.write("\n")
         f.write(f"{file_hash} {description}\n")
 
     print(f"Added to allowed client hashes.txt: {description}")

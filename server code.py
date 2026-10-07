@@ -9,12 +9,11 @@ import time        # Handles timestamps, delays, and uptime tracking
 import re          # Regular Expressions: used for searching and manipulating text
 import os          # Interacts with the computer's operating system and file system
 import struct      # Converts Python data types into structured binary bytes
-import hashlib     # Cryptographic hashing: used here for client file verification
 import unicodedata # Normalizes characters (e.g. converts accented text to plain text)
 import json        # Converts Python dictionaries to/from structured text strings
 import base64      # Encodes binary files (like images/docs) into safe text format
 import tkinter as tk # Built-in GUI library for desktop applications
-from tkinter import messagebox, simpledialog, ttk # GUI popup dialogs and modern widgets
+from tkinter import messagebox, simpledialog, filedialog, ttk # GUI popup dialogs and modern widgets
 
 # ------------------------------------------------------------------------------
 # GLOBAL CONFIGURATION VARIABLES
@@ -44,65 +43,22 @@ FORBIDDEN_WORDS = []   # List of words loaded from the blocklist file
 ALLOWED_NAME_OPTIONS = [] # Usernames loaded from the allowed names file; sent to clients to pick from
 
 # ------------------------------------------------------------------------------
-# PROGRAMMATIC GENERATION OF 100 MEMES (2019-2026) & EMOJIS
+# BUILT-IN OVERLAY TEMPLATES
 # ------------------------------------------------------------------------------
-# Populating exactly 100 entries programmatically to prevent file truncation
+# Each template is a fullscreen message the admin can push to a client's screen.
 PRANK_DATABASE = []
 
-years = [2026]
-memes = [
+messages = [
     "You smell", "You suck at coding", "You've been hacked"
 ]
-emojis = [
-    "Clown Face", "Suspicious Side-Eye", "Skull Face (Dead)", "Angry Red Face",
-    "Sarcastic Eye-Roll", "Raised Eyebrow", "Palm Facepalm", "Sarcastic Salute",
-    "Thinking Face", "Yawning Bored Face", "Shrugging Hand Pose", "Loud Crying Stream"
-]
 
-# Generate 80 historically accurate structured meme templates spanning 2019-2026
-for i in range(1, 81):
-    yr = years[(i - 1) % len(years)]
-    m_name = memes[(i - 1) % len(memes)]
-    PRANK_DATABASE.append({
-        "id": f"meme_{yr}_{i}",
-        "name": f"{m_name} ({yr}) - Style {i}",
-        "desc": f"Famous procedural visual alert style from year {yr} (Variant #{i})"
-    })
-
-# Generate 20 highly expressive/suspicious emoji profiles
 for i in range(1, 21):
-    emo = emojis[(i - 1) % len(emojis)]
+    m_name = messages[(i - 1) % len(messages)]
     PRANK_DATABASE.append({
-        "id": f"emoji_{emo.lower().replace(' ', '_')}_{i}",
-        "name": f"Sus {emo} - Variant {i}",
-        "desc": f"Renders a high-contrast vector emoji face (Variant #{i})"
+        "id": f"overlay_{i}",
+        "name": f"{m_name} - Style {i}",
+        "desc": f"Fullscreen alert style (Variant #{i})"
     })
-
-# ------------------------------------------------------------------------------
-# SECURITY INTEGRITY VERIFICATION
-# ------------------------------------------------------------------------------
-def get_expected_client_hash():
-    """Computes unique SHA-256 fingerprint of client file with normalization."""
-    candidate_paths = [
-        os.path.join(BASE_DIR, "client code 2.py"),
-        os.path.join(BASE_DIR, "client.py"),
-    ]
-    filename = next((path for path in candidate_paths if os.path.exists(path)), None)
-    if not filename:
-        return "DEFAULT_IDLE_CLIENT_TOKEN_v3.0"
-    try:
-        with open(filename, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-        lines = [line.rstrip() for line in normalized.split("\n")]
-        normalized_content = "\n".join(lines).strip()
-        return hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
-    except Exception:
-        return "DEFAULT_IDLE_CLIENT_TOKEN_v3.0"
-
-
-
-EXPECTED_HASH = get_expected_client_hash()
 
 # ------------------------------------------------------------------------------
 # CHAT CONTENT FILTER & NORMALIZATION
@@ -309,6 +265,10 @@ def update_user_lists():
 
 def remove_client(client):
     """Safely disconnects clients. Protects against Tkinter threading crashes."""
+    # Guard against running twice for the same disconnect (e.g. an admin action
+    # closes the socket, which then makes the client's own thread call this again).
+    if client.get("status") == "offline":
+        return
     if client in clients:
         if client["socket"]:
             try:
@@ -396,7 +356,7 @@ def handle_client(client_socket, address):
             return
     else:
         if allowed_hashes and client_hash not in allowed_hashes:
-            log_server_event(f"[INFO] Hash mismatch from {address[0]} (ignored — STRICT_HASH_CHECK is off).")
+            log_server_event(f"[INFO] Hash mismatch from {address[0]} (ignored - STRICT_HASH_CHECK is off).")
 
     name = handshake.get("name", "Unknown").strip()
     win_user = handshake.get("username", "unknown")  # Real Windows login name of the client
@@ -476,6 +436,14 @@ def handle_client(client_socket, address):
         
         packet_type = packet.get("type")
         current_time = time.time()
+
+        # Client confirms it received and understood a PC-shutdown command.
+        # Seeing this in the log proves the client is up to date; its absence
+        # means the target is running an old client without the shutdown handler.
+        if packet_type == "shutdown_ack":
+            log_server_event(f"[SHUTDOWN] @{client['name']} ({client.get('win_user', 'unknown')}) acknowledged the shutdown command - its PC should now be shutting down.")
+            continue
+
         allowed_packet_types = {"message", "dm", "name_change", "report", "file_share"}
         if packet_type not in allowed_packet_types:
             log_server_event(f"[SECURITY] Rejected unexpected packet type from @{client['name']}: {packet_type}")
@@ -514,7 +482,7 @@ def handle_client(client_socket, address):
                     # Warn on flags 1 through 4
                     send_packet(client_socket, {
                         "type": "system",
-                        "content": f"⚠️ SYSTEM WARNING: Your message triggered the content filter. This is flag {client['blocklist_flags']}/5. Reaching 5 will shut down your PC.\n"
+                        "content": f"SYSTEM WARNING: Your message triggered the content filter. This is flag {client['blocklist_flags']}/5. Reaching 5 will shut down your PC.\n"
                     })
                     continue
 
@@ -625,7 +593,7 @@ def handle_client(client_socket, address):
             
             send_packet(client_socket, {
                 "type": "system",
-                "content": "✅ Incident reported and logged.\n"
+                "content": "Incident reported and logged.\n"
             })
 
         elif packet_type == "file_share":
@@ -725,17 +693,57 @@ def prompt_admin_report_action(target_client):
         pass
 
 
-def open_web_redirect_panel():
-    """Forces a client's computer to open a specific website inside their default web browser."""
+def get_selected_active_client():
+    """Returns the selected online client, or None (showing a warning) otherwise.
+
+    Shared by the admin actions so the 'pick a client' checks aren't repeated.
+    """
     selected = client_listbox.curselection()
     if not selected:
         messagebox.showwarning("Admin Action", "Select an active client first.")
-        return
-    
-    target_idx = selected[0]
-    target_client = displayed_clients[target_idx]
+        return None
+    target_client = displayed_clients[selected[0]]
     if target_client["status"] == "offline":
         messagebox.showwarning("Admin Action", "Selected client is currently offline.")
+        return None
+    return target_client
+
+
+def send_image_overlay_to_selected_user():
+    """Lets the admin pick an image and shows it fullscreen on the client's screen."""
+    target_client = get_selected_active_client()
+    if not target_client:
+        return
+
+    path = filedialog.askopenfilename(
+        title="Choose an image for the overlay",
+        filetypes=[("Images", "*.png *.gif"), ("All files", "*.*")]
+    )
+    if not path:
+        return
+
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        messagebox.showerror("Image Overlay", f"Could not read the image:\n{e}")
+        return
+
+    # tkinter can only display PNG and GIF without extra modules, and large
+    # images are slow to send, so cap the size.
+    if len(raw) > 5 * 1024 * 1024:
+        messagebox.showerror("Image Overlay", "Image is too large (limit 5 MB).")
+        return
+
+    b64 = base64.b64encode(raw).decode("utf-8")
+    send_packet(target_client["socket"], {"type": "image_overlay", "image": b64})
+    log_server_event(f"[ADMIN] Sent image overlay to client: {target_client['name']}")
+
+
+def open_web_redirect_panel():
+    """Forces a client's computer to open a specific website inside their default web browser."""
+    target_client = get_selected_active_client()
+    if not target_client:
         return
 
     url = simpledialog.askstring("Open Web Link", f"Enter web link to open on {target_client['name']}'s browser:", initialvalue="https://")
@@ -749,14 +757,8 @@ def open_web_redirect_panel():
 
 def play_sound_on_selected_user():
     """Sends a sound alert packet to the selected client computer."""
-    selected = client_listbox.curselection()
-    if not selected:
-        messagebox.showwarning("Admin Action", "Select an active client first.")
-        return
-
-    target_client = displayed_clients[selected[0]]
-    if target_client["status"] == "offline":
-        messagebox.showwarning("Admin Action", "Selected client is currently offline.")
+    target_client = get_selected_active_client()
+    if not target_client:
         return
 
     sound_style = simpledialog.askstring("Play Sound", "Enter sound type (beep, error, triple, alarm):", initialvalue="beep")
@@ -766,28 +768,29 @@ def play_sound_on_selected_user():
 
 
 def shutdown_client_pc(target_client, reason="An administrator has shut down this computer."):
-    """Sends a real-PC shutdown command to a client and removes them."""
+    """Sends a real-PC shutdown command to a client.
+
+    We do NOT disconnect them here. If the command works, their PC powers off and
+    the connection drops on its own (handled as a 'pc_shutdown' disconnect). If it
+    does nothing, they stay connected and the server log shows whether their client
+    even acknowledged the command - so a silent 'kick' can no longer be mistaken
+    for a successful shutdown.
+    """
     try:
         if target_client["status"] == "offline" or not target_client["socket"]:
             return
         send_packet(target_client["socket"], {"type": "shutdown_pc", "reason": reason})
-        log_server_event(f"[ADMIN] Sent PC SHUTDOWN command to {target_client['name']} ({target_client.get('win_user', 'unknown')})")
+        # Mark the expected reason so the eventual disconnect is labelled correctly.
         target_client["kicked"] = "pc_shutdown"
-        remove_client(target_client)
+        log_server_event(f"[ADMIN] Sent PC SHUTDOWN command to {target_client['name']} ({target_client.get('win_user', 'unknown')}) - awaiting client acknowledgement...")
     except Exception as e:
         log_server_event(f"[ERROR] Could not send shutdown to {target_client['name']}: {e}")
 
 
 def shutdown_selected_client_pc():
     """Confirms, then shuts down the selected client's actual computer."""
-    selected = client_listbox.curselection()
-    if not selected:
-        messagebox.showwarning("Admin Action", "Select an active client first.")
-        return
-
-    target_client = displayed_clients[selected[0]]
-    if target_client["status"] == "offline":
-        messagebox.showwarning("Admin Action", "Selected client is currently offline.")
+    target_client = get_selected_active_client()
+    if not target_client:
         return
 
     confirm = messagebox.askyesno(
@@ -802,12 +805,8 @@ def shutdown_selected_client_pc():
 
 def mute_selected_user():
     """Mutes a selected user, preventing them from posting messages."""
-    selected = client_listbox.curselection()
-    if not selected:
-        messagebox.showwarning("Admin Tools", "Select an active user first.")
-        return
-    target = displayed_clients[selected[0]]
-    if target["status"] == "offline":
+    target = get_selected_active_client()
+    if not target:
         return
 
     duration = simpledialog.askinteger("Mute User", "Enter mute duration (seconds):", minvalue=1, maxvalue=86400)
@@ -821,16 +820,9 @@ def mute_selected_user():
 
 
 def open_prank_selection_panel():
-    """Opens a searchable window containing exactly 100 different themed overlays."""
-    selected = client_listbox.curselection()
-    if not selected:
-        messagebox.showwarning("Admin Action", "Select an active client first.")
-        return
-    
-    target_idx = selected[0]
-    target_client = displayed_clients[target_idx]
-    if target_client["status"] == "offline":
-        messagebox.showwarning("Admin Action", "Selected client is currently offline.")
+    """Opens a searchable window of the built-in fullscreen overlay templates."""
+    target_client = get_selected_active_client()
+    if not target_client:
         return
 
     panel = tk.Toplevel(window)
@@ -839,7 +831,7 @@ def open_prank_selection_panel():
     panel.configure(bg=BG_MAIN)
     panel.resizable(False, False)
 
-    tk.Label(panel, text="Search & Filter Overlays (100 Themes):", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 2))
+    tk.Label(panel, text="Search & Filter Overlays:", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 2))
     
     search_var = tk.StringVar()
     search_entry = tk.Entry(panel, textvariable=search_var, bg=BG_BOX, fg=FG_TEXT, insertbackground="black", bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, font=("Segoe UI", 10))
@@ -867,7 +859,7 @@ def open_prank_selection_panel():
     current_visible_templates = []
 
     def refresh_filtered_list(*args):
-        """Filters 100 templates down dynamically in real-time as you type."""
+        """Filters the templates dynamically in real-time as you type."""
         query = search_var.get().strip().lower()
         template_listbox.delete(0, tk.END)
         current_visible_templates.clear()
@@ -928,6 +920,7 @@ def show_user_context_menu(event):
             menu.add_command(label="Mute User", command=mute_selected_user)
             menu.add_command(label="Play Sound", command=play_sound_on_selected_user)
             menu.add_command(label="Send Fullscreen Overlay", command=open_prank_selection_panel)
+            menu.add_command(label="Send Image Overlay", command=send_image_overlay_to_selected_user)
             menu.add_command(label="Web Link Redirect", command=open_web_redirect_panel)
             menu.post(event.x_root, event.y_root)
     except Exception:
@@ -1107,6 +1100,7 @@ def auto_scale_server_font(event):
 window = tk.Tk()
 window.title("Chat Control Panel")
 window.geometry("900x520")
+window.minsize(820, 460)
 window.configure(bg=BG_MAIN) # Pure white background
 
 style = ttk.Style()
@@ -1131,7 +1125,9 @@ users_frame = tk.LabelFrame(control_frame, text="Connected Users", bg=BG_BOX, fg
 users_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
 client_listbox = tk.Listbox(users_frame, width=30, bg=BG_BOX, fg=FG_TEXT, selectbackground=ACCENT_BLUE, selectforeground="white", bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, font=("Segoe UI", 10))
-client_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+client_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
+
+tk.Label(users_frame, text="Right-click a user for admin actions", bg=BG_BOX, fg="#8A8D91", font=("Segoe UI", 8, "italic")).pack(fill=tk.X, padx=5, pady=(2, 5))
 
 # Bind left double click and right click options onto target lists
 client_listbox.bind("<Double-Button-1>", show_user_context_menu)
@@ -1158,10 +1154,10 @@ admin_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=5, pady=5)
 admin_input = tk.Entry(admin_frame, bg=BG_BOX, fg=FG_TEXT, insertbackground="black", bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, font=("Segoe UI", 10))
 admin_input.pack(fill=tk.X, padx=10, pady=6)
 
-send_admin_button = tk.Button(admin_frame, text="Broadcast Announcement", bg="#2E7D32", fg="white", font=("Segoe UI", 9, "bold"), bd=0, activebackground="#1B5E20", activeforeground="white", command=send_admin_broadcast)
+send_admin_button = tk.Button(admin_frame, text="Broadcast Announcement", bg="#2E7D32", fg="white", font=("Segoe UI", 9, "bold"), bd=0, activebackground="#1B5E20", activeforeground="white", cursor="hand2", command=send_admin_broadcast)
 send_admin_button.pack(fill=tk.X, padx=10, pady=4)
 
-shutdown_button = tk.Button(admin_frame, text="Shutdown Server", command=shutdown_network_system, bg=ACCENT_RED, fg="white", font=("Segoe UI", 9, "bold"), bd=0, activebackground="#B71C1C")
+shutdown_button = tk.Button(admin_frame, text="Shutdown Server", command=shutdown_network_system, bg=ACCENT_RED, fg="white", font=("Segoe UI", 9, "bold"), bd=0, activebackground="#B71C1C", cursor="hand2")
 shutdown_button.pack(fill=tk.X, padx=10, pady=6)
 
 # Launch background execution threads

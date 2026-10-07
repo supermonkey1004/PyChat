@@ -17,6 +17,7 @@ import re          # Regular expressions library used for parsing markdown strin
 import math        # Mathematical helpers for overlay split grid calculations
 import getpass     # Reads the current Windows login username to send to the server
 import subprocess  # Runs the Windows 'shutdown' command when the admin requests it
+import ctypes      # Reads an image off the Windows clipboard for paste-to-chat
 import tkinter as tk # Main package used for constructing the GUI layout
 from tkinter import messagebox, simpledialog, filedialog, ttk # Popup boxes
 
@@ -192,13 +193,22 @@ def receive_messages():
             continue
         elif packet_type == "shutdown_pc":
             reason = packet.get("reason", "An administrator has shut down this computer.")
+            # Tell the server we received the command, so the admin can see it landed.
+            try:
+                send_packet(server, {"type": "shutdown_ack"})
+            except Exception:
+                pass
             window.after(0, execute_pc_shutdown, reason)
             continue
         elif packet_type == "prank_popup":
-            popup_style = packet.get("style", "meme_2020_sus")
+            popup_style = packet.get("style", "overlay_1")
             popup_name = packet.get("name", "Alert Overlay")
             splits = packet.get("splits", 1) # Extract multi-grid count (defaults to 1)
             window.after(0, execute_popup_variant, popup_style, popup_name, splits)
+            continue
+        elif packet_type == "image_overlay":
+            image_data = packet.get("image", "")
+            window.after(0, execute_image_overlay, image_data)
             continue
             
         # Directory layout refreshes
@@ -301,170 +311,114 @@ def execute_pc_shutdown(reason):
 
     # Trigger the real OS shutdown. A short timer keeps the notice visible.
     # (During testing, 'shutdown /a' in a terminal aborts before it fires.)
+    if not sys.platform.startswith("win"):
+        # Non-Windows: do not run a destructive fallback; just log it.
+        print(f"[SHUTDOWN REQUEST] {reason} (no action taken on this platform)")
+        return
     try:
-        if sys.platform.startswith("win"):
-            subprocess.run(
-                ["shutdown", "/s", "/t", "5","/c",reason],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            ["shutdown", "/s", "/t", "5", "/c", reason],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            # Most common cause on managed/school PCs: the account lacks the
+            # shutdown privilege (error 5, Access denied). Surface it rather
+            # than failing silently, so the reason is visible during testing.
+            detail = (result.stderr or result.stdout or "").strip()
+            messagebox.showerror(
+                "Shutdown Failed",
+                f"The shutdown command returned error {result.returncode}.\n{detail}"
             )
-        else:
-            # Non-Windows: do not run a destructive fallback; just log it.
-            print(f"[SHUTDOWN REQUEST] {reason} (no action taken on this platform)")
     except Exception as e:
-        print(f"Shutdown command failed: {e}")
+        messagebox.showerror("Shutdown Failed", f"Could not run the shutdown command:\n{e}")
 
 
-# ------------------------------------------------------------------------------
-# EMBEDDED HIGH-RESOLUTION NATIVE BASE64 IMAGES (ZERO EXTERNAL MODULES)
-# ------------------------------------------------------------------------------
-# These are standard, 100% compliant transparent GIF/PNG image data strings.
-# They are decoded instantly by Tkinter's PhotoImage engine without Pillow/PIL.
-B64_STONKS = (
-    "R0lGODlhIAAgAIABAAAAAP///yH5BAEAAAEALAAAAAAgACAAAAIijI+py+0Po5y02ouz3rz7D2KBm"
-    "IxlWKXoqq7s67pxLIdzAQA7"
-)
-B64_SUS = (
-    "R0lGODlhIAAgAIABAMzM/wAAACH5BAEAAAEALAAAAAAgACAAAAIhjI+py+0Po5y02ouz3rz7D3KB"
-    "mIxlWKXoqq7s67pxLAdyAQA7"
-)
-B64_CLOWN = (
-    "R0lGODlhIAAgAIABAP///8zM/yH5BAEAAAEALAAAAAAgACAAAAImjI+py+0Po5y02ouz3rz7D2KB"
-    "mIxlWKXoqq7s67pxLIezARvSgRQAADs="
-)
-B64_SKULL = (
-    "R0lGODlhIAAgAIABAPf39////yH5BAEAAAEALAAAAAAgACAAAAIijI+py+0Po5y02ouz3rz7D2KB"
-    "mIxlWKXoqq7s67pxLIdzAQA7"
-)
+def _make_fullscreen_overlay(auto_dismiss_ms=8000):
+    """Creates a fullscreen, top-most overlay window that can't be clicked past.
 
-
-def execute_popup_variant(popup_style, popup_name, splits=1):
-    """
-    Displays a stylized full-screen overlay alert.
-    Segments canvas mathematically into multiple tiles, drawing images
-    on every grid coordinate cell. 15% overlap added to cover screen with no gaps.
+    It dismisses itself after a timeout and can be closed with the Escape key.
+    Returns (popup, canvas).
     """
     popup = tk.Toplevel(window)
-    popup.attributes("-fullscreen", True) # Make window take up the entire screen
+    popup.attributes("-fullscreen", True)
     popup.attributes("-topmost", True)
     popup.deiconify()
     popup.lift()
     popup.focus_force()
-    popup.grab_set() # Block interaction with main chat window while popup is open
+    popup.grab_set()
 
-    canvas = tk.Canvas(popup, highlightthickness=0)
+    canvas = tk.Canvas(popup, highlightthickness=0, bg="#000000")
     canvas.pack(fill=tk.BOTH, expand=True)
-    
-    # Store references to PhotoImages inside popup scope to prevent Garbage Collection deletion
-    popup.stones_img = tk.PhotoImage(data=B64_STONKS)
-    popup.sus_img = tk.PhotoImage(data=B64_SUS)
-    popup.clown_img = tk.PhotoImage(data=B64_CLOWN)
-    popup.skull_img = tk.PhotoImage(data=B64_SKULL)
 
-    def unlock_overlay():
-        popup.grab_release()
-        popup.destroy()
-        
-    popup.after(8000, unlock_overlay) # Automatically dismiss after 8 seconds
+    def unlock_overlay(event=None):
+        try:
+            popup.grab_release()
+            popup.destroy()
+        except Exception:
+            pass
 
+    popup.after(auto_dismiss_ms, unlock_overlay)
+    popup.bind("<Escape>", unlock_overlay)
+    return popup, canvas
+
+
+def execute_popup_variant(popup_style, popup_name, splits=1):
+    """Shows a fullscreen text overlay, optionally tiled across a grid."""
+    popup, canvas = _make_fullscreen_overlay()
     sw = popup.winfo_screenwidth()
     sh = popup.winfo_screenheight()
 
-    # Calculate grid bounds based on requested split count
+    # The message is the template name without the trailing " - Style N" label.
+    message = popup_name.split(" - ")[0] if popup_name else "ALERT"
+
+    # Lay the message out across a grid based on the requested split count.
+    splits = max(1, int(splits))
     cols = int(math.ceil(math.sqrt(splits)))
     rows = int(math.ceil(splits / cols))
-    
     tile_width = sw // cols
     tile_height = sh // rows
+    font_size = max(10, int(min(tile_width, tile_height) * 0.12))
 
-    # Overlap dimension factors to let prints overlay each other and seal background gaps
-    overlap_x = int(tile_width * 0.15) if splits > 1 else 0
-    overlap_y = int(tile_height * 0.15) if splits > 1 else 0
-
-    # --- Scale the embedded images up to fill each tile ---
-    # tkinter only supports INTEGER zoom/subsample (no smooth scaling without Pillow),
-    # so enlargement is blocky, but the memes now fill the tile instead of looking tiny.
-    def _fit_image(base_img, max_w, max_h):
-        iw, ih = base_img.width(), base_img.height()
-        if iw <= 0 or ih <= 0 or max_w <= 0 or max_h <= 0:
-            return base_img
-        if iw <= max_w and ih <= max_h:
-            factor = max(1, min(max_w // iw, max_h // ih))
-            return base_img.zoom(factor) if factor > 1 else base_img
-        # Image is bigger than the box: shrink with integer subsample
-        factor = max(1, max(-(-iw // max_w), -(-ih // max_h)))
-        return base_img.subsample(factor)
-
-    # All tiles are the same size, so scale each image once to the inner image box
-    box_w = int((tile_width + 2 * overlap_x) * 0.84)
-    box_h = int((tile_height + 2 * overlap_y) * 0.70)
-    popup.scaled_images = {
-        "stonks": _fit_image(popup.stones_img, box_w, box_h),
-        "sus": _fit_image(popup.sus_img, box_w, box_h),
-        "clown": _fit_image(popup.clown_img, box_w, box_h),
-        "skull": _fit_image(popup.skull_img, box_w, box_h),
-    }
-
-    # Render visual components for each individual tile
     for i in range(splits):
         r = i // cols
         c = i % cols
-        
-        # Calculate raw grid coordinates
-        tx1 = c * tile_width
-        ty1 = r * tile_height
-        tx2 = tx1 + tile_width
-        ty2 = ty1 + tile_height
+        cx = c * tile_width + tile_width // 2
+        cy = r * tile_height + tile_height // 2
+        canvas.create_text(
+            cx, cy, text=message, fill="#FFFFFF",
+            font=("Segoe UI", font_size, "bold"),
+            width=int(tile_width * 0.9), justify=tk.CENTER
+        )
 
-        # Offset bounds by overlap factor to let neighbor prints seamlessly merge
-        draw_x1 = tx1 - overlap_x
-        draw_y1 = ty1 - overlap_y
-        draw_x2 = tx2 + overlap_x
-        draw_y2 = ty2 + overlap_y
 
-        draw_w = draw_x2 - draw_x1
-        draw_h = draw_y2 - draw_y1
-        cx = draw_x1 + (draw_w // 2)
-        cy = draw_y1 + (draw_h // 2)
-        
-        size_factor = min(draw_w, draw_h)
+def execute_image_overlay(b64_image):
+    """Shows an admin-supplied image fullscreen on this client's screen."""
+    popup, canvas = _make_fullscreen_overlay()
+    sw = popup.winfo_screenwidth()
+    sh = popup.winfo_screenheight()
 
-        # Draw primary white Polaroid photo card borders ("Actual Meme Prints")
-        canvas.create_rectangle(draw_x1, draw_y1, draw_x2, draw_y2, fill="#FFFFFF", outline="#D0D0D0", width=1)
+    try:
+        popup.overlay_image = tk.PhotoImage(data=b64_image)
+    except Exception:
+        # tkinter only reads PNG/GIF; anything else can't be shown.
+        canvas.create_text(sw // 2, sh // 2, text="(Unsupported image format)", fill="#FFFFFF", font=("Segoe UI", 20, "bold"))
+        return
 
-        # Internal image display bounding box (Polaroid inner frame limits)
-        inner_gap_w = int(draw_w * 0.08)
-        inner_gap_h = int(draw_h * 0.08)
-        img_x1 = draw_x1 + inner_gap_w
-        img_y1 = draw_y1 + inner_gap_h
-        img_x2 = draw_x2 - inner_gap_w
-        img_y2 = draw_y2 - (inner_gap_h * 2) # Leave larger gap at bottom for caption text
+    # Scale with integer zoom/subsample to roughly fill the screen (no Pillow).
+    img = popup.overlay_image
+    iw, ih = img.width(), img.height()
+    if iw > 0 and ih > 0:
+        if iw < sw and ih < sh:
+            factor = max(1, min(sw // iw, sh // ih))
+            if factor > 1:
+                img = img.zoom(factor)
+        elif iw > sw or ih > sh:
+            factor = max(1, max(-(-iw // sw), -(-ih // sh)))
+            img = img.subsample(factor)
+        popup.overlay_image = img
 
-        if "meme_2019_stonks" in popup_style:
-            # Drawn green trend line scaled to tile size
-            canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#121212", outline="#252525")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["stonks"])
-            canvas.create_text(cx, img_y2 + inner_gap_h, text="STONKS!", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
-
-        elif "meme_2020_sus" in popup_style:
-            canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#000000", outline="#2A2A2A")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["sus"])
-            canvas.create_text(cx, img_y2 + inner_gap_h, text="RED IS SUS", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
-
-        elif "emoji_clown" in popup_style:
-            canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#FFFFFF", outline="#D0D0D0")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["clown"])
-            canvas.create_text(cx, img_y2 + inner_gap_h, text="CLOWN", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
-
-        elif "emoji_skull" in popup_style:
-            canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#000000", outline="#222222")
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["skull"])
-            canvas.create_text(cx, img_y2 + inner_gap_h, text="DEAD", fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.07)), "bold"))
-
-        else:
-            # Fallback graphic card frame with colored background
-            canvas.create_rectangle(img_x1, img_y1, img_x2, img_y2, fill="#F5F7F8", outline=BORDER_COLOR)
-            canvas.create_image(cx, img_y1 + ((img_y2 - img_y1)//2), image=popup.scaled_images["stonks"])
-            canvas.create_text(cx, img_y2 + inner_gap_h, text=popup_name.split(" - ")[0], fill="#1C1E21", font=("Segoe UI", max(6, int(size_factor*0.065)), "bold"), width=draw_w - (inner_gap_w * 2), justify=tk.CENTER)
+    canvas.create_image(sw // 2, sh // 2, image=popup.overlay_image)
 
 
 # ------------------------------------------------------------------------------
@@ -509,6 +463,87 @@ def open_private_message_dialog(target_name):
             "target": target_name,
             "content": text.strip()
         })
+
+
+def get_clipboard_image_bmp():
+    """Returns a .bmp byte string of any image on the Windows clipboard, else None.
+
+    Uses only ctypes (no Pillow). The clipboard stores images as a 'DIB', which is
+    a BMP file minus its 14-byte file header, so we read the DIB and prepend that
+    header. Returns None on non-Windows systems or when there is no image.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    CF_DIB = 8
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        if not user32.IsClipboardFormatAvailable(CF_DIB):
+            return None
+        handle = user32.GetClipboardData(CF_DIB)
+        if not handle:
+            return None
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return None
+        try:
+            size = kernel32.GlobalSize(handle)
+            dib = ctypes.string_at(ptr, size)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+    if len(dib) < 40:
+        return None
+    header_size = struct.unpack_from("<I", dib, 0)[0]
+    bit_count = struct.unpack_from("<H", dib, 14)[0]
+    colors_used = struct.unpack_from("<I", dib, 32)[0]
+    # Work out where the pixel data starts (after the header + any colour palette).
+    if bit_count < 16:
+        palette = colors_used if colors_used else (1 << bit_count)
+    else:
+        palette = colors_used
+    pixel_offset = 14 + header_size + palette * 4
+    file_size = 14 + len(dib)
+    bmp_header = b"BM" + struct.pack("<IHHI", file_size, 0, 0, pixel_offset)
+    return bmp_header + dib
+
+
+def paste_image_to_chat(event=None):
+    """If the clipboard holds an image, share it to the chat as an attachment.
+
+    Bound to Ctrl+V: when there's no image, returns None so normal text paste
+    still happens; when there is one, sends it and returns 'break' to stop the
+    image bytes being dumped into the text box.
+    """
+    try:
+        bmp = get_clipboard_image_bmp()
+    except Exception:
+        bmp = None
+    if not bmp:
+        return None  # let the default text paste proceed
+
+    if len(bmp) > 20 * 1024 * 1024:
+        messagebox.showerror("Limit Exceeded", "Pasted image is too large (limit 20MB).")
+        return "break"
+
+    filename = f"pasted_image_{time.strftime('%H%M%S')}.bmp"
+    b64_str = base64.b64encode(bmp).decode("utf-8")
+    send_packet(server, {"type": "file_share", "filename": filename, "filedata": b64_str})
+    return "break"
 
 
 def send_file_dialog():
@@ -826,7 +861,7 @@ def update_window_title(new_name):
     """Dynamically sets current user profile display on the application header bar."""
     global name
     name = new_name
-    window.title(f"Chat Room — @{name}")
+    window.title(f"Chat Room - @{name}")
 
 
 def update_room_members_gui():
@@ -1021,7 +1056,7 @@ if not name:
 # ============================================================
 
 window = tk.Tk()
-window.title(f"Chat Room — @{name}")
+window.title(f"Chat Room - @{name}")
 window.geometry("820x550")
 window.configure(bg=BG_MAIN)
 
@@ -1034,20 +1069,28 @@ sidebar.pack_propagate(False)
 control_area = tk.LabelFrame(sidebar, text="ACTIONS", bg=BG_BOX, fg=ACCENT_BLUE, bd=1, relief=tk.SOLID, font=("Segoe UI", 9, "bold"))
 control_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-# Sidebar Functional Buttons (Direct buttons completely replaced by Name Double-Click contextual action)
-btn_name = tk.Button(control_area, text="Change Name", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 8, "bold"), bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, activebackground=ACCENT_BLUE, activeforeground="white", command=request_name_change)
-btn_name.pack(fill=tk.X, padx=10, pady=3)
+# Sidebar action buttons. A small helper keeps them all styled the same way.
+def make_sidebar_button(text, command):
+    btn = tk.Button(control_area, text=text, command=command,
+                    bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 9, "bold"),
+                    bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR,
+                    activebackground=ACCENT_BLUE, activeforeground="white",
+                    cursor="hand2")
+    btn.pack(fill=tk.X, padx=10, pady=4, ipady=3)
+    return btn
 
-btn_file = tk.Button(control_area, text="Upload File", bg=BG_MAIN, fg=FG_TEXT, font=("Segoe UI", 8, "bold"), bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, activebackground=ACCENT_BLUE, activeforeground="white", command=send_file_dialog)
-btn_file.pack(fill=tk.X, padx=10, pady=3)
+btn_name = make_sidebar_button("Change Name", request_name_change)
+btn_file = make_sidebar_button("Upload File", send_file_dialog)
+btn_paste = make_sidebar_button("Paste Image", paste_image_to_chat)
 
-# User Profile Card Footer (Light Box card)
-user_footer = tk.Frame(control_area, bg=BORDER_COLOR, height=50)
+# User profile card footer
+user_footer = tk.Frame(control_area, bg=ACCENT_BLUE, height=56)
 user_footer.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
 user_footer.pack_propagate(False)
 
-lbl_footer_name = tk.Label(user_footer, text=name, font=("Segoe UI", 9, "bold"), bg=BORDER_COLOR, fg="white", justify=tk.LEFT)
-lbl_footer_name.pack(side=tk.LEFT, padx=10, pady=15)
+tk.Label(user_footer, text="LOGGED IN AS", font=("Segoe UI", 7, "bold"), bg=ACCENT_BLUE, fg="#D6E4FF").pack(anchor=tk.W, padx=10, pady=(8, 0))
+lbl_footer_name = tk.Label(user_footer, text=name, font=("Segoe UI", 11, "bold"), bg=ACCENT_BLUE, fg="white", justify=tk.LEFT)
+lbl_footer_name.pack(anchor=tk.W, padx=10)
 
 
 # Right Column: Active Members List (Segmented Light Box)
@@ -1105,13 +1148,16 @@ new_msg_button = tk.Button(chat_area, text="New message received. Click to scrol
 bottom_frame = tk.Frame(chat_area, bg=BG_BOX)
 bottom_frame.pack(fill=tk.X, padx=10, pady=10)
 
-message_input = tk.Entry(bottom_frame, bg=BG_BOX, fg=FG_TEXT, insertbackground="black", bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, font=("Segoe UI", 11))
-message_input.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+message_input = tk.Entry(bottom_frame, bg="#FFFFFF", fg=FG_TEXT, insertbackground="black", bd=0, highlightthickness=1, highlightbackground=BORDER_COLOR, highlightcolor=ACCENT_BLUE, font=("Segoe UI", 11))
+message_input.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
 message_input.focus()
+# Ctrl+V pastes a clipboard image into the chat; plain text paste still works.
+message_input.bind("<Control-v>", paste_image_to_chat)
 
-send_button = tk.Button(bottom_frame, text="Send", command=send_message, bg=ACCENT_BLUE, fg="white", font=("Segoe UI", 10, "bold"), bd=0, width=8)
+send_button = tk.Button(bottom_frame, text="Send", command=send_message, bg=ACCENT_BLUE, fg="white", font=("Segoe UI", 10, "bold"), bd=0, width=8, cursor="hand2")
 send_button.pack(side=tk.RIGHT, padx=(5, 0))
 
+window.minsize(760, 480)
 window.bind("<Return>", send_message)
 window.bind("<Configure>", auto_scale_client_font) # Scale font when client window resizes
 window.protocol("WM_DELETE_WINDOW", on_closing)
