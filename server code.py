@@ -26,7 +26,7 @@ ALLOWED_HASHES_FILE = os.path.join(BASE_DIR, "allowed client hashes.txt")
 
 # Set this to True to block clients if their code has been altered or renamed.
 # Set to False to allow any client connection regardless of file hash.
-STRICT_HASH_CHECK = False
+STRICT_HASH_CHECK = True
 
 # Professional light theme color palette: pure white background with soft panels
 BG_MAIN = "#FFFFFF"      # Clean white main background
